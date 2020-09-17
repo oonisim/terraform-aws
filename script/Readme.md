@@ -25,21 +25,21 @@ https://www.terraform.io/docs/providers/aws/r/api_gateway_integration.html
 
 ```
 ├── inventories   <--- Environment
-│   ├── dev
-│   ├── prd
-│   ├── Readme.md
-│   └── uat
+│   ├── dev
+│   ├── prd
+│   ├── Readme.md
+│   └── uat
 ├── modules       <--- Terraform module directory
-│   ├── apigw
-│   ├── consumer
-│   ├── dynamodb
-│   ├── executor
-│   ├── nacl
-│   ├── policy
-│   ├── producer
-│   ├── rds
-│   ├── s3
-│   └── user
+│   ├── apigw
+│   ├── consumer
+│   ├── dynamodb
+│   ├── executor
+│   ├── nacl
+│   ├── policy
+│   ├── producer
+│   ├── rds
+│   ├── s3
+│   └── user
 ├── Readme.md
 ├── run.sh        <--- Runner program to execute to setup the Terraform scripts
 └── scripts       <--- Additional setup scripts to aid the AWS platform setup.
@@ -54,13 +54,13 @@ https://www.terraform.io/docs/providers/aws/r/api_gateway_integration.html
 #### Terraform backend
 Create a S3 backend for each inventory before creating AWS resources for the environment.
 ```dtd
-terraform/scripts/backend/create.sh
+scripts/backend/create.sh
 ```
 
 #### Terraform plugins
 To avoid downloading multiple times, pre-download the plugins.
 ```dtd
-terraform/plugins/run.sh
+plugins/run.sh
 ```
 
 ## Docker
@@ -98,7 +98,7 @@ AWS_SECURITY_DEVICE_ARN # for MFA
 
 In case of MFA is enabled and to be used, get a temporal session token from STS s in the script.
 ```dtd
-terraform/scripts/mfa/aws_mfa_setup.sh
+scripts/mfa/aws_mfa_setup.sh
 ```
 
 ## Nodejs
@@ -109,6 +109,6 @@ sudo apt install nodejs npm
 # Run
 
 ```dtd
-terraform/run.sh
+run.sh
 ```
 
