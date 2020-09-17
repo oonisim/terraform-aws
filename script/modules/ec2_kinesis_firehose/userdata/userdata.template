@@ -1,0 +1,69 @@
+#!/bin/bash -x
+yum check-update
+amazon-linux-extras install epel
+yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+
+#--------------------------------------------------------------------------------
+# HTTPD
+#--------------------------------------------------------------------------------
+sudo yum install -y httpd
+sudo systemctl restart httpd
+
+echo "<html><body>Hello from $(hostname)</body></html>" > /var/www/html/index.html
+
+#--------------------------------------------------------------------------------
+# https://docs.aws.amazon.com/firehose/latest/dev/writing-with-agents.html#download-install
+# https://github.com/awslabs/amazon-kinesis-agent/blob/master/configuration/example/agent.json
+#--------------------------------------------------------------------------------
+#sudo yum install –y aws-kinesis-agent
+
+#--------------------------------------------------------------------------------
+# This will ask GPG key import, hence not complete.
+# Retrieving key from file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7
+#  Importing GPG key 0x352C64E5:
+#   Userid     : "Fedora EPEL (7) <epel@fedoraproject.org>"
+#   Fingerprint: 91e9 7d7c 4a5e 96f1 7f3e 888f 6a2f aea2 352c 64e5
+#   Package    : epel-release-7-11.noarch (@amzn2extra-epel)
+#   From       : /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7
+#  Is this ok [y/N]: y
+#
+#--------------------------------------------------------------------------------
+sudo rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7
+
+#--------------------------------------------------------------------------------
+# Broken pipe - write failed
+# https://unix.stackexchange.com/questions/84813/what-makes-a-unix-process-die-with-broken-pipe
+#
+# yes keeps writing to pipe even after the yum completed, hence the error.
+#  -> How to address?
+#--------------------------------------------------------------------------------
+yes | sudo yum install –y https://s3.amazonaws.com/streaming-data-agent/aws-kinesis-agent-latest.amzn1.noarch.rpm
+
+cat << EOF > /etc/aws-kinesis/agent.json
+{
+   "cloudwatch.endpoint":"monitoring.${region}.amazonaws.com",
+   "cloudwatch.emitMetrics":true,
+   "firehose.endpoint":"firehose.${region}.amazonaws.com",
+   "flows":[
+      {
+         "filePattern":"${file_pattern}",
+         "deliveryStream":"${firehose_name}",
+         "dataProcessingOptions":[
+            {
+               "initialPostion":"START_OF_FILE",
+               "maxBufferAgeMillis":"2000",
+               "maxBufferSizeRecords": "10",
+               "optionName":"LOGTOJSON",
+               "logFormat":"COMBINEDAPACHELOG"
+            }
+         ]
+      }
+   ]
+}
+EOF
+
+sudo chgrp -R aws-kinesis-agent-user /var/log/httpd
+sudo chmod -R g+rx /var/log/httpd
+
+sudo systemctl enable aws-kinesis-agent
+sudo systemctl restart aws-kinesis-agent

@@ -1,0 +1,32 @@
+[
+  {
+    "name": "${name}",
+    "image": "${image}",
+    "cpu": ${cpu_units},
+    "memory": ${memory_units},
+    "essential": true,
+    "portMappings": ${port_mappings},
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-region": "${aws_region}",
+        "awslogs-group": "${cloudwatch_lg_ecs_name}",
+        "awslogs-stream-prefix": "${cloudwatch_lg_ecs_prefix}"
+      }
+    },
+    "environment": [
+        {
+            "name": "AWS_DEFAULT_REGION",
+            "value": "${aws_region}"
+        },
+        {
+            "name": "PROJECT",
+            "value": "${project}"
+        },
+        {
+            "name": "ENVIRONMENT",
+            "value": "${environment}"
+        }
+    ]
+  }
+]

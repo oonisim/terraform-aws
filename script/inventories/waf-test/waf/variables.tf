@@ -1,0 +1,5 @@
+variable "PROJECT" {
+}
+
+variable "ENV" {
+}

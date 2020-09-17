@@ -1,0 +1,2 @@
+xray_tracing_enabled = true
+enable_apigw_stage_cloudwatch_access_log = false

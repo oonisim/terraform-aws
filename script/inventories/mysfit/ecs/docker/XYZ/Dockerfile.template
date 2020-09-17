@@ -1,0 +1,15 @@
+FROM mhart/alpine-node:7.10.1
+
+WORKDIR /srv
+ADD . .
+RUN npm install
+
+#--------------------------------------------------------------------------------
+# Dockerfile EXPOSE (https://docs.docker.com/engine/reference/builder/)
+# The EXPOSE does not actually publish the port but functions as a type of
+# documentation betwee those who build the image and the those who deploy it,
+# about which ports are intended to be published.
+#--------------------------------------------------------------------------------
+EXPOSE ${expose_ports}
+
+CMD ["node", "server.js"]

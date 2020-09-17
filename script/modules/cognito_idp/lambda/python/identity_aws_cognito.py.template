@@ -1,0 +1,710 @@
+"""
+Identity Pool management.
+
+[Note]
+Using the code from AWS
+
+<-----
+Cognito JWT token utility based on AWS sample code
+https://github.com/awslabs/aws-support-tools/tree/master/Cognito/decode-verify-jwt
+
+Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Licensed under the Apache License, Version 2.0 (the "License"). You may not use this file
+except in compliance with the License. A copy of the License is located at
+#
+    http://aws.amazon.com/apache2.0/
+#
+or in the "license" file accompanying this file. This file is distributed on an "AS IS"
+BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+License for the specific language governing permissions and limitations under the License.
+----->
+"""
+import time
+import decimal
+import json
+import hmac
+import hashlib
+import base64
+import json
+import random
+import string
+
+# Python2
+from urllib import urlopen
+# Python3
+#from urllib.request import urlopen
+
+import boto3
+import botocore
+import botocore.exceptions
+
+# --------------------------------------------------------------------------------
+# Python-jose The JavaScript Object Signing and Encryption (JOSE) technologies
+# https://github.com/mpdavis/python-jose
+# PyJWT can be a replacemnent for Python 2.7.
+# jwt can be a replacement for Python 3
+# --------------------------------------------------------------------------------
+from jose import jwk, jwt
+from jose.utils import base64url_decode
+
+from utility import \
+    FILEPATH_SEPARATOR, \
+    interrupt_handler, \
+    getEpoch, \
+    atimer, \
+    load_json_file, \
+    pretty_json, \
+    log_debug, \
+    log_error, \
+    log_exception, \
+    validate, \
+    boto_exception
+
+from identity_constants import \
+    IDENTITY_ERROR_USER_NOT_EXIST, \
+    IDENTITY_ERROR_INCORRECT_CREDENTIAL, \
+    IDENTITY_ERROR_TOKEN_EXPIRED, \
+    IDENTITY_ERROR_TOKEN_SIGN_KEY_NOT_FOUND, \
+    IDENTITY_ERROR_TOKEN_SIGNATURE_NO_MATCH, \
+    IDENTITY_ERROR_TOKEN_INVALID, \
+    IDENTITY_ERROR_TOKEN_INVALID_AUDIENCE
+
+# --------------------------------------------------------------------------------
+# Terraform interpolation
+# --------------------------------------------------------------------------------
+COGNITO_USERPOOL = {
+    "region": "${userpool_region}",
+    "userpool_id": "${userpool_id}",
+    "app_client_id": "${userpool_app_client_id}",
+    "app_client_secret": "${userpool_app_client_secret}"
+}
+
+
+# --------------------------------------------------------------------------------
+# Cognito IDP
+# --------------------------------------------------------------------------------
+def get_client(region):
+    """EC2 resource accessor
+
+    Returns:
+        Boto3 EC2 client
+    """
+    if not hasattr(get_client, "client"):
+        setattr(get_client, "client", boto3.client('cognito-idp', region_name=region))
+        assert(getattr(get_client, "client") is not None), "set_client:no client set"
+
+    return getattr(get_client, "client")
+
+
+def _get_secret_hash(username, app_client_id, app_client_secret):
+    msg = username + app_client_id
+    digest = hmac.new(
+        str(app_client_secret).encode('utf-8'),
+        msg = str(msg).encode('utf-8'),
+        digestmod=hashlib.sha256
+    ).digest()
+    hash = base64.b64encode(digest).decode()
+
+    log_debug("secret hash for cognito UP is [{0}]".format(hash))
+    return hash
+
+
+def get_secret_hash(username):
+    return _get_secret_hash(
+        username,
+        COGNITO_USERPOOL['app_client_id'],
+        COGNITO_USERPOOL['app_client_secret']
+    )
+
+
+def id_generator(size=20, chars=string.ascii_uppercase + string.digits):
+    return ''.join(random.SystemRandom().choice(chars) for _ in range(size))
+
+
+@boto_exception
+def create_user(username, password):
+    """Signup a user
+    """
+    temp_password = id_generator()
+    response = get_client(COGNITO_USERPOOL['region']).admin_create_user(
+        UserPoolId=COGNITO_USERPOOL['userpool_id'],
+        Username=username,
+        UserAttributes=[
+            {
+                'Name': 'email',
+                'Value': username
+            },
+        ],
+        TemporaryPassword=temp_password,
+        MessageAction='SUPPRESS'
+    )
+    validate("cognito-idp:admin_create_user", response)
+    log_debug("cognito-idp:admin_create_user response [{0}]".format(
+        pretty_json(response)
+    ))
+
+    response = _authenticate({
+            "username": username,
+            "password": temp_password
+        },
+        COGNITO_USERPOOL
+    )
+    session = response['Session']
+
+    response = get_client(COGNITO_USERPOOL['region']).admin_respond_to_auth_challenge(
+        UserPoolId=COGNITO_USERPOOL['userpool_id'],
+        ClientId=COGNITO_USERPOOL['app_client_id'],
+        ChallengeName="NEW_PASSWORD_REQUIRED",
+        ChallengeResponses={
+            'USERNAME': username,
+            'NEW_PASSWORD': password,
+            'SECRET_HASH': get_secret_hash(username)
+        },
+        Session=session
+    )
+    validate("cognito-idp:admin_respond_to_auth_challenge", response)
+    log_debug("cognito-idp:admin_respond_to_auth_challenge response [{0}]".format(
+        pretty_json(response)
+    ))
+    return response
+
+
+@boto_exception
+def delete_user(username):
+    """Delete user from the identity pool
+    Args:
+        username: user to delete
+    Returns: Boto3 response
+    """
+    response = get_client(COGNITO_USERPOOL['region']).admin_delete_user(
+        UserPoolId=COGNITO_USERPOOL['userpool_id'],
+        Username=username
+    )
+    log_debug("cognito-idp:admin_delete_user response [{0}]".format(
+        pretty_json(response)
+    ))
+    validate("cognito-idp:admin_delete_user", response)
+    return response
+
+
+@boto_exception
+def _get_user(username, userpool):
+    """Get the user from the identity pool
+    Args:
+        username: username (email)
+        userpool: Cognito userpool data
+    Return: Boto3 response of list_users
+        See https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/cognito-idp.html#CognitoIdentityProvider.Client.list_users
+    Raises: RuntimeException
+    """
+
+    response = get_client(userpool['region']).list_users(
+        UserPoolId=userpool['userpool_id'],
+        Filter='"email"="{0}"'.format(username)
+    )
+    log_debug("list_users response is [{0}]".format(pretty_json(response)))
+    validate("cognito-idp:list_users", response)
+
+    return(response)
+
+
+def is_user_valid(username):
+    """Verify user validity
+    Args:
+        username: Cognito IDP username (email)
+
+    Returns: True if user is Confirmed and Enabled=True
+    """
+    result = False
+    response = _get_user(username, COGNITO_USERPOOL)
+    if len(response['Users']):
+        user = response['Users'][0]
+        result = (user['UserStatus'] == 'CONFIRMED') and (user['Enabled'] == True)
+
+    return result
+
+
+@boto_exception
+def _disable_user(username, userpool):
+    """Disable Cognito IDP user
+    """
+    response = get_client(userpool['region']).admin_disable_user(
+        UserPoolId=userpool['userpool_id'],
+        Username=username
+    )
+    log_debug("admin_disable_user response is [{0}]".format(pretty_json(response)))
+    validate("cognito-idp:admin_disable_user", response)
+
+
+def disable_user(username):
+    """Disable Cognito IDP user
+    """
+    return _disable_user(username, COGNITO_USERPOOL)
+
+
+@boto_exception
+def _enable_user(username, userpool):
+    """Enable Cognito IDP user
+    """
+    response = get_client(userpool['region']).admin_enable_user(
+        UserPoolId=userpool['userpool_id'],
+        Username=username
+    )
+    log_debug("admin_enable_user response is [{0}]".format(pretty_json(response)))
+    validate("cognito-idp:admin_enable_user", response)
+
+
+def enable_user(username):
+    """Enable Cognito IDP user
+    """
+    return _enable_user(username, COGNITO_USERPOOL)
+
+
+def user_match(token, user):
+    """Verify if the user of the token matches the user
+    Args:
+        token: identity token
+        user: user to match
+    """
+    user_claims = decode(token)
+    if not (user_claims['email'] == user):
+        log_error("user [{0}] does not match with [{1}] in the token".format(
+            user,
+            user_claims['email']
+        ))
+        return False
+    else:
+        return True
+
+
+# --------------------------------------------------------------------------------
+# Cognito User Pool
+# --------------------------------------------------------------------------------
+def userpool_keys(userpool):
+    """Generate cognito public keys
+
+    Amazon Cognito generates a key pair of RSA keys for each user pool.
+    The corresponding public key becomes available at an address in this format:
+    https://cognito-idp.{region}.amazonaws.com/{userPoolId}/.well-known/jwks.json
+    """
+
+    region = userpool['region']
+    userpool_id = userpool['userpool_id']
+    app_client_id = userpool['app_client_id']
+    keys_url = 'https://cognito-idp.{}.amazonaws.com/{}/.well-known/jwks.json'.format(region, userpool_id)
+    log_debug(keys_url)
+    # instead of re-downloading the public keys every time
+    # we download them only on cold start
+    # https://aws.amazon.com/blogs/compute/container-reuse-in-lambda/
+    response = urlopen(keys_url)
+    keys = json.loads(response.read())['keys']
+
+    return keys
+
+
+def decode(token):
+    """Wrapper to call the identity management technology specific token decode.
+    Args:
+        token: identity management technology specific token
+    Returns: identity management technology independent user claims in the format defined in identity_proxy.py
+    """
+    cognito_user_claims =  _decode(token, COGNITO_USERPOOL, True)
+    assert cognito_user_claims['sub'] == cognito_user_claims['cognito:username'], \
+        "Cognito token user_claims sub {0} != cognito:username {1}".format(
+            cognito_user_claims['sub'],
+            cognito_user_claims['cognito:username']
+        )
+
+    general_user_claims = {
+        "uid": cognito_user_claims['sub'],
+        "email": cognito_user_claims['email'],
+        "authenticated_time": cognito_user_claims['auth_time'],
+        "expiry": cognito_user_claims['exp']
+    }
+
+    return general_user_claims
+
+
+def decode_without_expiry_check(token):
+    """Decode without checking expiry
+    """
+    cognito_user_claims =  _decode(token, COGNITO_USERPOOL, False)
+    assert cognito_user_claims['sub'] == cognito_user_claims['cognito:username'], \
+        "Cognito token user_claims sub {0} != cognito:username {1}".format(
+            cognito_user_claims['sub'],
+            cognito_user_claims['cognito:username']
+        )
+
+    general_user_claims = {
+        "uid": cognito_user_claims['sub'],
+        "email": cognito_user_claims['email'],
+        "authenticated_time": cognito_user_claims['auth_time'],
+        "expiry": cognito_user_claims['exp']
+    }
+
+    return general_user_claims
+
+
+
+def _decode(token, userpool, expiry_check):
+    """Decode Cognito token
+    Args:
+        token: Token to identify the user
+    Returns:
+        Cognito specific user claims:
+        {
+           "sub":"95868e37-178e-4510-a3ab-ab9b1c3285f9",
+           "event_id":"2c3daf0d-d329-11e8-97ee-71c97b54dc09",
+           "token_use":"id",
+           "iat":1539903442,
+           "iss":"https://cognito-idp.us-east-1.amazonaws.com/us-east-1_b8goqWOhe",
+           "exp":1539907042,
+           "auth_time":1539903442,
+           "cognito:username":"95868e37-178e-4510-a3ab-ab9b1c3285f9",
+           "email":"",
+           "aud":"laheqkakm9o7d8ssgai7v18qd"
+        }
+    Raises:
+        RuntimeError with the cause as its message
+
+    """
+
+    # get the kid from the headers prior to verification
+    headers = jwt.get_unverified_headers(token)
+    kid = headers['kid']
+    # search for the kid in the downloaded public keys
+    keys = userpool_keys(userpool)
+    key_index = -1
+    for i in range(len(keys)):
+        if kid == keys[i]['kid']:
+            key_index = i
+            break
+    if key_index == -1:
+        error = IDENTITY_ERROR_TOKEN_SIGN_KEY_NOT_FOUND
+        log_debug(error)
+        raise RuntimeError(error)
+
+    # construct the public key
+    public_key = jwk.construct(keys[key_index])
+    # get the last two sections of the token,
+    # message and signature (encoded in base64)
+    message, encoded_signature = str(token).rsplit('.', 1)
+    # decode the signature
+    decoded_signature = base64url_decode(encoded_signature.encode('utf-8'))
+
+    # --------------------------------------------------------------------------------
+    # verify the signature
+    # --------------------------------------------------------------------------------
+    if not public_key.verify(message.encode("utf8"), decoded_signature):
+        error = IDENTITY_ERROR_TOKEN_SIGNATURE_NO_MATCH
+        log_debug(error)
+        raise RuntimeError(error)
+
+    log_debug('Signature successfully verified')
+
+    # since we passed the verification, we can now safely use the unverified claims
+    claims = jwt.get_unverified_claims(token)
+
+    # --------------------------------------------------------------------------------
+    # Verify the token validity
+    # --------------------------------------------------------------------------------
+    if expiry_check and time.time() > claims['exp']:
+        error = IDENTITY_ERROR_TOKEN_EXPIRED
+        log_debug(error)
+        raise RuntimeError(error)
+
+    # and the Audience  (use claims['client_id'] if verifying an access token)
+    if claims['aud'] != userpool['app_client_id']:
+        error = IDENTITY_ERROR_TOKEN_INVALID_AUDIENCE
+        log_debug(error)
+        raise RuntimeError(error)
+
+    # --------------------------------------------------------------------------------
+    # Validate the user
+    # --------------------------------------------------------------------------------
+    email = claims['email']
+    if not is_user_valid(email):
+        log_error("User {0} not available".format(email))
+        raise RuntimeError(IDENTITY_ERROR_USER_NOT_EXIST)
+
+    log_debug("decoded cognito user_claims is [{0}]".format(pretty_json(claims)))
+    return claims
+
+
+def _authenticate(credential, userpool):
+    """Authenticate user/password with Cognito UserPool
+    Args:
+        credential: {
+            "username": body['username'],
+            "password": body['password'],
+        }
+        userpool: Cogito Userpool data
+
+    Returns: Boto3 response
+    """
+    try:
+        username = credential['username']
+        password = credential['password']
+
+        userpool_id = userpool['userpool_id']
+        app_client_id = userpool['app_client_id']
+        app_client_secret = userpool['app_client_secret']
+        secret_hash = _get_secret_hash(
+            username,
+            app_client_id,
+            app_client_secret
+        )
+
+        region = userpool['region']
+        response = get_client(region).admin_initiate_auth(
+            UserPoolId=userpool_id,
+            ClientId=app_client_id,
+            AuthFlow='ADMIN_NO_SRP_AUTH',
+            AuthParameters={
+                'USERNAME': username,
+                'SECRET_HASH': secret_hash,
+                'PASSWORD': password
+            },
+            ClientMetadata={
+                'username': username,
+                'password': password
+            }
+        )
+        log_debug("cognito-idp:admin_initiate_auth response[{0}]".format(pretty_json(response)))
+        return response
+
+#    except get_client(region).exceptions.NotAuthorizedException as exception:
+#        log_error("authentication [{0}] failed with response [{1}]".format(
+#            exception.operation_name,
+#            pretty_json(exception.response)
+#         ))
+#        return None, exception.response['Error']
+#
+
+    except botocore.exceptions.ClientError as exception:
+        log_error("cognito-idp:admin_initiate_auth failed with response [{0}]".format(
+            pretty_json(exception.response)
+        ))
+        raise RuntimeError(exception.response['Error']['Message'])
+
+    except Exception as exception:
+        log_error("authenticate failed with exception: type [{0}] message [{1}]".format(
+            type(exception),
+            str(exception)
+        ))
+        raise RuntimeError("{0}".format(str(exception)))
+
+
+def authenticate(credential):
+    """Wrapper to call technology dependent _authenticate
+    """
+    return _authenticate(credential, COGNITO_USERPOOL)
+
+
+def _renew_token(credential, userpool):
+    """Rewnew ID and Access tokens
+
+    TODO: Need to implement JWT token signature verification.
+
+    Refresh token does not get renewed (by default, it lasts 30 days).
+    Verify the "Refresh token expiration (days)" in App clients menu in Cognito User Pool.
+
+    The decoded ID token sample:
+    {
+        "aud": "64ifuo1npd3jcb07hbng6r8deo",
+        "auth_time": 1549437029,
+        "cognito:username": "48e6634b-e65a-4a90-87cf-8e08aed338bd",
+        "email": "",
+        "event_id": "48a19bb7-29de-11e9-ac4a-55e67e8350cb",
+        "exp": 1549440629,
+        "iat": 1549437029,
+        "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_DOUmuK5Ad",
+        "sub": "48e6634b-e65a-4a90-87cf-8e08aed338bd",
+        "token_use": "id"
+    }
+
+    Args:
+        credential: {
+            "username": body['username'],
+            "IdToken": body['IdToken'],
+            "RefreshToken": body['RefreshToken']
+        }
+        userpool: Cogito Userpool data
+
+    Returns: Boto3 response
+    Raises: RuntimeError
+    """
+    try:
+        username = credential['username']
+        id_token = credential['IdToken']
+        refresh_token = credential['RefreshToken']
+        region = userpool['region']
+
+        # --------------------------------------------------------------------------------
+        # Decode JWT to get the encoded username/email to avoid "Unable to verify secret hash".
+        # https://stackoverflow.com/questions/54430978/unable-to-verify-secret-hash-for-client-at-refresh-token-auth
+        # --------------------------------------------------------------------------------
+        decoded = decode_without_expiry_check(id_token)
+        log_debug("decoded JWT is [{0}]".format(pretty_json(decoded)))
+        uid = decoded['uid']
+
+        # username/email
+        if decoded['email'] != username:
+            log_error("Token email [{0}] does not match with username [{1}]".format(
+                decoded['email'],
+                username
+            ))
+            msg = IDENTITY_ERROR_TOKEN_INVALID
+            raise RuntimeError(msg)
+
+        # --------------------------------------------------------------------------------
+        # Cognito REFRESH_TOKEN_AUTH flow
+        # --------------------------------------------------------------------------------
+        userpool_id = userpool['userpool_id']
+        app_client_id = userpool['app_client_id']
+        app_client_secret = userpool['app_client_secret']
+        secret_hash = _get_secret_hash(
+            uid,
+            app_client_id,
+            app_client_secret
+        )
+
+        response = get_client(region).admin_initiate_auth(
+            UserPoolId=userpool_id,
+            ClientId=app_client_id,
+            AuthFlow='REFRESH_TOKEN_AUTH',
+            AuthParameters={
+                'REFRESH_TOKEN': refresh_token,
+                'SECRET_HASH': secret_hash
+            }
+        )
+        log_debug("cognito-idp:admin_initiate_auth response[{0}]".format(pretty_json(response)))
+        return response
+
+    except botocore.exceptions.ClientError as exception:
+        log_error("cognito-idp:admin_initiate_auth failed with response [{0}]".format(
+            pretty_json(exception.response)
+        ))
+        raise RuntimeError(exception.response['Error']['Message'])
+
+    except Exception as exception:
+        log_error("refresh_token failed with exception: type [{0}] message [{1}]".format(
+            type(exception),
+            str(exception)
+        ))
+        raise RuntimeError("{0}".format(str(exception)))
+
+
+def renew_token(credential):
+    """Wrapper to call technology dependent _renew_token()
+    """
+    return _renew_token(credential, COGNITO_USERPOOL)
+
+
+# --------------------------------------------------------------------------------
+# Lambda
+# --------------------------------------------------------------------------------
+def main(credential):
+    """Handle signin & renew token request
+    """
+    log_debug("credential is [{0}]".format(pretty_json(credential)))
+
+    if 'password' in credential:
+        response = authenticate(credential)
+        # Refresh token is only from authenticate
+        refresh_token = response['AuthenticationResult']['RefreshToken']
+
+    else:
+        response = renew_token(credential)
+        refresh_token = credential['RefreshToken']
+
+    id_token = response['AuthenticationResult']['IdToken']
+    access_token = response['AuthenticationResult']['AccessToken']
+
+    return id_token, access_token, refresh_token
+
+
+def get_credential(event):
+    """Get credential from the HTTP POST body in the labmda event
+
+    [Expected input format]
+    The HTTP POST body is STRING, NOT JSON/Dictionary, hence needs to decode into JSON from String.
+    When testing from API Gateway, encoding Request Body field into 'body' element is done by API GW.
+
+    - For signin
+    {u'body': u'{ \n "username": "", \n "password": "Password"\n}',...}
+
+    - For refresh token
+    {u'body': u'{ \n "username": "", \n "IdToken": "<token>"\n, "refresh_token": "<token>"\n}',...}
+
+    Args:
+        event: Lambda event
+    Returns:
+        { "username": <username>, "password": <password> } for signin
+        { "username": <username>, "IdToken": <token>, "RefreshToken": <token> } for refresh
+
+    Raises:
+        RuntimeError
+
+    """
+    # Body is string, not JSON.
+    try:
+        body = json.loads(event['body'])
+        if 'password' in body:
+            return {
+                "username": body['username'],
+                "password": body['password']
+            }
+        else:
+            return {
+                "username": body['username'],
+                "IdToken": body['IdToken'],
+                "RefreshToken": body['RefreshToken']
+            }
+
+    except KeyError:
+        raise RuntimeError("Expected key (username, password, IdToken, RefreshToken) does not exist.")
+
+    except Exception as exception:
+        log_error("Cannot get HTTP body with exception [{0}]".format(str(exception)))
+        raise RuntimeError("Authentiation data is not provided or incorrect")
+
+
+def lambda_handler(event, context):
+
+    log_debug("event [{0}]".format(pretty_json(event)))
+    try:
+        credential = get_credential(event)
+        id_token, access_token, refresh_token = main(credential)
+
+        assert(id_token is not None), "id_token is None"
+        log_debug('id token: ' + id_token)
+
+        response = {
+            "username"     : credential['username'],
+            "IdToken"      : id_token,
+            "AccessToken"  : access_token,
+            "RefreshToken" : refresh_token
+        }
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"
+            },
+            "body": json.dumps(response),
+            "isBase64Encoded": False
+        }
+
+    except RuntimeError as exception:
+        return {
+            "statusCode": 500,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"
+            },
+            "body": pretty_json({
+                "message": str(exception)
+            }),
+            "isBase64Encoded": False
+        }

@@ -1,0 +1,45 @@
+#!/bin/bash -xe
+cat << EOF  >> /etc/ecs/ecs.config
+ECS_CLUSTER=${ecs_cluster_name}
+ECS_LOGLEVEL=debug
+ECS_LOGFILE=/ecs-agent.log
+EOF
+
+yum check-update
+yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+amazon-linux-extras install epel
+
+#sudo yum install -y httpd
+#sudo systemctl restart httpd
+
+#echo "Hello, World" > index.html
+
+
+#--------------------------------------------------------------------------------
+# Docker
+#--------------------------------------------------------------------------------
+cat <<'EOF' >> /etc/docker/daemon.json.new
+{
+   "group":"docker",
+   "debug":true,
+   "insecure-registries":[
+      "${docker_repository_host}:${docker_repository_port}"
+   ],
+}
+EOF
+
+chgrp docker /var/run/docker.sock
+usermod -a -G docker ${ec2_user}
+systemctl restart docker
+
+#--------------------------------------------------------------------------------
+# Yum
+#--------------------------------------------------------------------------------
+cat <<'EOF' >> /etc/yum.conf.new
+{
+
+}
+EOF
+
+yum check-update
+yum install -y amazon-efs-utils

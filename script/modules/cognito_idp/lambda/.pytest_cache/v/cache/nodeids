@@ -1,0 +1,11 @@
+[
+  "test/test_00_signup.py::test_signup", 
+  "test/test_10_signin.py::test_decode_someones_token", 
+  "test/test_10_signin.py::test_signin_normal", 
+  "test/test_10_signin.py::test_signin_error_invalid_username", 
+  "test/test_10_signin.py::test_signin_error_invalid_password", 
+  "test/test_10_signin.py::test_refresh_normal", 
+  "test/test_10_signin.py::test_refresh_expired_token_normal", 
+  "test/test_10_signin.py::test_refresh_error_refresh_token_expired", 
+  "test/test_10_signin.py::test_refresh_error_token_invalid"
+]

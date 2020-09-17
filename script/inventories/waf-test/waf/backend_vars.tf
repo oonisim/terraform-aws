@@ -1,0 +1,2 @@
+variable "BACKEND_BUCKET" {
+}
