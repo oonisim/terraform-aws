@@ -3,6 +3,7 @@ Terraform implementation of Mythical Mysfits - Build a Modern Application on AWS
 * [CDK version](https://github.com/aws-samples/aws-modern-application-workshop/blob/python-cdk/module-2/app/service/mythicalMysfitsService.py).
 * [CloudFormation version](https://github.com/aws-samples/aws-modern-application-workshop/tree/python)
 
+<img src="diagram/mysfits.png" align="left"/>
 
 # TODO
 * Separate Security Group into a module. Configure network access control using security group. For example, limit the access to ECR VPC endpoint only from the SG attached to the ECS EC2 instances.
